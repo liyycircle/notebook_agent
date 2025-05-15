@@ -37,8 +37,14 @@ def summary_csv(file_path: str):
 
 def generate_notebook(query: str):
     """create the json format of notebook for the given query"""
-
-    description = f"请完成{query}的代码，并封装为ipynb框架的json格式，最终仅返回json。注意：1. Use os.path.join('../data', file_path) for file reading. 2. Use Chinese descriptions. 3. Ensure Chinese characters display correctly in plots if any. 4. Ensure the code is executable. 5. If hypothesis testing is required, the default significance level is 0.05, and conclusions should be described based on this value"
+    requirements = [
+        "Use os.path.join('../data', file_path) for file reading. ",
+        "Use Chinese descriptions. ",
+        "Ensure Chinese characters display correctly in plots if any. ",
+        "Ensure the code is executable.",
+        "If hypothesis testing is required, the default significance level is 0.05, and conclusions should be described based on this value"
+    ]
+    description = f"根据要求{requirements},完成{query}的代码，并封装为ipynb框架的json格式，最终仅返回json。"
 
     return description
 
