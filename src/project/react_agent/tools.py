@@ -3,10 +3,10 @@ import json, os, time
 import pandas as pd
 
 def gen_notebook(notebook_name: str, notebook: str) -> str:
-    """create a jupter notebook from the json schema, named as notebook_name. return success or failed. the notebook should be runable"""
+    """create a jupter notebook from the json schema, named as notebook_name. the name should summarize the content of the notebook. return success or failed."""
     try:
         notebook = json.loads(notebook)
-        with open(os.path.join('dest', f'{notebook_name}.ipynb'), 'w', encoding='utf-8') as f:
+        with open(os.path.join('dest', notebook_name), 'w', encoding='utf-8') as f:
             json.dump(notebook, f, ensure_ascii=False, indent=1)
         return f"{notebook_name} 保存成功"
     except Exception as e:
@@ -14,14 +14,7 @@ def gen_notebook(notebook_name: str, notebook: str) -> str:
 
 
 def run_notebook(cells: List[int]) -> str:
-    """运行 cell list 中的指定 cell，返回运行结果。用于检测生成的notebook是否能正常运行，应当在gen_notebook之后调用
-    
-    Args:
-        cells (List[int]): 要运行的cell索引列表，从0开始
-        
-    Returns:
-        str: 运行结果，包含成功或失败信息
-    """
+    """Run specified cells in the notebook and return execution results. cells is list of cell indices to run. If empty, all cells will be run."""
     try:
         # 读取notebook文件
         with open(os.path.join('dest', 'temp.ipynb'), 'r', encoding='utf-8') as f:
@@ -48,6 +41,5 @@ def run_notebook(cells: List[int]) -> str:
     except Exception as e:
         return f"运行失败: {str(e)}"
 
-
-APP_TOOLS: List[Callable[..., Any]] = [gen_notebook]
+APP_TOOLS: List[Callable[..., Any]] = [gen_notebook, run_notebook]
 TOOLS: List[Callable[..., Any]] = [gen_notebook]
