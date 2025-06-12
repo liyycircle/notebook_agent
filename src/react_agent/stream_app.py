@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 # @time    : 2025/05/27 11:42
 # @author  : Leah
-# @function: post service of fastapi
+# @function: post service of fastapi with streaming support
 
-from typing import Dict, List, Literal, cast, TypedDict, Optional
+from typing import Dict, List, Literal, cast, TypedDict, Optional, AsyncGenerator
 import uuid
 import time
+import json
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
@@ -86,11 +88,10 @@ def gen_notebook(state: MyState) -> Dict:
         }
     
     # 确保返回所有工具调用
-    # TODO：notebook_name处理
     print('response.tool_calls', response.tool_calls, flush=True)
-    # if response.tool_calls:
-    #     random_number = str(uuid.uuid4())[-4:]
-    #     response.tool_calls[0]['args']['notebook_name'] += '_'+random_number
+    if response.tool_calls:
+        random_number = str(uuid.uuid4())[-4:]
+        response.tool_calls[0]['args']['notebook_name'] += '_'+random_number
 
     return {
         "tool_calls": response.tool_calls,
@@ -126,50 +127,61 @@ builder.add_edge("tool_node", "__end__")
 checkpointer = MemorySaver()
 graph = builder.compile(checkpointer=checkpointer, name="Notebook Agent")
 
-# from IPython.display import Image, display
-# graph_image = graph.get_graph(xray=True).draw_mermaid_png()
-# display(Image(graph_image))
-# with open('graph.png', "wb") as f:
-#     f.write(graph_image)
-
-@app.post('/app', response_model=ResponseModel)
-def run_agent(request_data: RequestModel):
+async def stream_response(request_data: RequestModel) -> AsyncGenerator[str, None]:
     try:
         logger.info(f"Received request with content: {request_data.content}")
         config = {"configurable": {"thread_id": request_data.threadid}}
 
-        if request_data.content =='system_stop':
+        if request_data.content == 'system_stop':
             graph.update_state(config, {'force_stop': True})
-            return ResponseModel(
+            response = ResponseModel(
                 content='',
                 tool_calls=[],
                 id=str(uuid.uuid4()),
                 type='stop'
             )
+            yield f"data: {json.dumps(response.to_dict())}\n\n"
+            return
+
         if request_data.role == 'tool':
             request_message = ToolMessage(
                 content=request_data.content,
                 tool_call_id=request_data.tool_call_id,
-                status = 'error' if request_data.status=='failed' else request_data.status)
+                status='error' if request_data.status=='failed' else request_data.status)
         else:
             request_message = HumanMessage(content=request_data.content)
+
         start_time = time.time()
-        result = graph.invoke({"messages": [request_message]}, config)
+        async for event in graph.astream({"messages": [request_message]}, config):
+            for value in event.values():
+                if "messages" in value:
+                    response = ResponseModel(
+                        content=value["messages"][-1].content,
+                        tool_calls=value["messages"][-1].tool_calls if hasattr(value["messages"][-1], 'tool_calls') else [],
+                        id=value["messages"][-1].id,
+                        type=value["messages"][-1].type if hasattr(value["messages"][-1], 'type') else 'ai'
+                    )
+                    yield f"data: {json.dumps(response.to_dict())}\n\n"
+
         end_time = time.time()
         logger.info(f"Successfully processed request, time cost: {end_time - start_time} 秒")
-        return ResponseModel(
-            content=result["messages"][-1].content,
-            tool_calls=result["messages"][-1].tool_calls,
-            id=result["messages"][-1].id,
-            type=result["messages"][-1].type
-        )
 
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing request: {str(e)}"
+        error_response = ResponseModel(
+            content=f"Error: {str(e)}",
+            tool_calls=[],
+            id=str(uuid.uuid4()),
+            type='ai'
         )
+        yield f"data: {json.dumps(error_response.to_dict())}\n\n"
+
+@app.post('/app')
+async def run_agent(request_data: RequestModel):
+    return StreamingResponse(
+        stream_response(request_data),
+        media_type='text/event-stream'
+    )
 
 if __name__ == '__main__':
     import uvicorn

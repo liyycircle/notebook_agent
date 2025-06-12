@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Sequence, List, Dict
-
 from langchain_core.messages import AnyMessage, AIMessage
 from langgraph.graph import add_messages
 from langgraph.managed import IsLastStep
@@ -66,5 +65,4 @@ class MyState(State):
     intent: str = field(default="")
     notebook_name: str = field(default="")
     tool_calls: List[Dict] = field(default_factory=list)
-    auto_dissect: bool = field(default=False) 
-    auto_run_notebook: bool = field(default=False)
+    force_stop: bool = field(default=False)

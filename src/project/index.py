@@ -6,7 +6,7 @@
 
 from typing import Dict, List, Literal, cast, TypedDict, Optional
 import uuid
-
+import time
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
@@ -16,7 +16,7 @@ from project.react_agent.configuration import Configuration
 from project.react_agent.state import InputState, MyState
 from project.react_agent.tools import APP_TOOLS
 from project.react_agent.utils import load_chat_model, RequestModel, ResponseModel, ToolResponse
-from project.react_agent.prompts import INTENT_PROMPT, TF_PROMPT, GEN_NOTEBOOK_PROMPT
+from project.react_agent.prompts import INTENT_PROMPT, GEN_NOTEBOOK_PROMPT
 from langgraph.checkpoint.memory import MemorySaver
 
 import logging
@@ -32,53 +32,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Define the function that calls the model
-def pre_node(state: MyState) -> Command[Literal["__end__", "dissect_problem"]]:
-    # 路由节点
-    if len(state.messages)>2:
-        model = load_chat_model('deepseek/deepseek-chat')
-        # 处理工具返回
-  
-        if isinstance(state.messages[-1], ToolMessage):
-            if (state.auto_dissect) or (state.messages[-1].status == 'error'):
-                logger.info("强制拆解问题")
-                return Command(goto="dissect_problem", update = {"auto_dissect":False})
-            elif len(state.tool_calls)>0:
-                print(state.tool_calls, flush=True)
-                logger.info(f"工具调用成功，继续调用{state.tool_calls[0]['name']}")
-                return Command(goto="tool_node")
-            else:
-                logger.info("工具调用成功")
-                return Command(
-                    goto="__end__", 
-                    update={"messages": [AIMessage(content=state.messages[-1].content)]})
+def analyze_intent(state: MyState) -> Command[Literal["__end__", "tool_node", "gen_notebook"]]:
+    model = load_chat_model('deepseek/deepseek-chat')
+    # 处理工具调用结果
+    if isinstance(state.messages[-1], ToolMessage):
+        print('state.force_stop', state.force_stop, flush=True)
+        # 如果用户要求停止，停止工具list的自动调用
+        if state.force_stop:
+            return Command(
+                goto='__end__', 
+                update={"force_stop":False, "messages": [AIMessage(content='')]})
+        elif (len(state.tool_calls)>0) and (state.messages[-1].status == 'success'):
+            logger.info(f"工具调用成功，继续调用{state.tool_calls[0]['name']}")
+            return Command(goto="tool_node")
+        elif (len(state.tool_calls)==0) and (state.messages[-1].status == 'success'):
+            logger.info("工具list调用完成")
+            return Command(
+                goto="__end__", 
+                update={"messages": [AIMessage(content=state.messages[-1].content)]})
         else:
-            call_message = f'请结合agent拆解"{state.messages[-2].content}"与用户回答"{state.messages[-1].content}"，判断用户是否同意拆解结果，同意（或是）返回"yes"，否则"no"'
-            print(call_message, flush=True)
-            response = cast(
-                AIMessage,
-                model.invoke([
-                    {"role": "system", "content": TF_PROMPT},
-                    {"role": "system", "content": call_message}]))
-            if response.content == "yes":
-                logger.info("用户同意开始生成notebook")
-                return Command(goto="gen_notebook", update={"intent": state.messages[-2].content})
-            else:
-                logger.info("用户不同意开始生成notebook，重新拆解问题")
-                return Command(goto="dissect_problem")
+            pass
     else:
-        logger.info("开始拆解问题")
-        return Command(goto="dissect_problem")
-
-
-def dissect_problem(state: MyState) -> Command[Literal["__end__"]]:
-    model = load_chat_model('deepseek/deepseek-reasoner')
-    response = cast(
-        AIMessage,
-        model.invoke(
-            [{"role": "system", "content": INTENT_PROMPT}, *state.messages]
-        ),
-    )
-    return Command(goto="__end__", update={"messages": [response]})
+        logger.info("分析问题")
+        response = cast(
+            AIMessage,
+            model.invoke(
+                [{"role": "system", "content": INTENT_PROMPT}, *state.messages]
+            ),
+        )
+        if response.content[0] == "T":
+            return Command(goto="gen_notebook", update={"intent": response.content[2:]})
+        else:
+            return Command(
+                goto="__end__", 
+                update={"messages": [AIMessage(content=response.content)]})
 
 def gen_notebook(state: MyState) -> Dict:
     model = load_chat_model('deepseek/deepseek-coder').bind_tools(APP_TOOLS)  
@@ -115,10 +102,9 @@ def gen_notebook(state: MyState) -> Dict:
 
 def tool_node(state: MyState) -> Dict:
     response = state.tool_calls.pop(0) # 删除并返回第一项
-    auto_dissect = len(state.tool_calls)==0
     print('待处理 state.tool_calls', state.tool_calls  , '---------')
     
-    tool_response = ToolResponse(notebook_name=state.notebook_name)
+    tool_response = ToolResponse(notebook_name=state.notebook_name, summary = state.intent)
     output = AIMessage(
         content=getattr(tool_response, response['name']),
         tool_calls=[{
@@ -127,17 +113,16 @@ def tool_node(state: MyState) -> Dict:
             'args': response['args']
         }],
         id=uuid.uuid4())
-    return {"messages": [output], "auto_dissect": auto_dissect}
+    return {"messages": [output]}
 
 app = FastAPI()
 # Define a new graph
 builder = StateGraph(MyState, input=InputState, config_schema=Configuration)
-builder.add_node(pre_node)
-builder.add_node(dissect_problem)
+builder.add_node(analyze_intent)
 builder.add_node(gen_notebook)
 builder.add_node(tool_node)
 
-builder.add_edge("__start__", "pre_node")
+builder.add_edge("__start__", "analyze_intent")
 builder.add_edge("gen_notebook", "tool_node")
 builder.add_edge("tool_node", "__end__")
 
@@ -153,21 +138,14 @@ def invoke(_input):
         logger.info(f"Received request with content: {_input['content']}")
         config = {"configurable": {"thread_id": _input['threadid']}}
 
-        # 检查是否是终止请求
-        if _input['content']=='system_stop':
-            current_state = checkpointer.get(config)
-            if current_state and isinstance(current_state, list):
-                # 只删除最后一个状态
-                current_state.pop()
-                # 更新状态
-                checkpointer.put(config, current_state)
-            
+        if _input['content'] =='system_stop':
+            graph.update_state(config, {'force_stop': True})
             return ResponseModel(
-                content="",
+                content='',
                 tool_calls=[],
                 id=str(uuid.uuid4()),
-                type="stop"
-            )
+                type='stop'
+            ).to_dict()
 
         if _input['role'] == 'tool':
             request_message = ToolMessage(
@@ -176,9 +154,10 @@ def invoke(_input):
                 status = 'error' if _input['status']=='failed' else _input['status'])
         else:
             request_message = HumanMessage(content=_input['content'])
-
+        start_time = time.time()
         result = graph.invoke({"messages": [request_message]}, config)
-        logger.info("Successfully processed request")
+        end_time = time.time()
+        logger.info(f"Successfully processed request, time cost: {end_time - start_time} 秒")
         return ResponseModel(
             content=result["messages"][-1].content,
             tool_calls=result["messages"][-1].tool_calls,

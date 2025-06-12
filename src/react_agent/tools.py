@@ -6,55 +6,11 @@ import requests
 import random
 
 
-# async def search(query: str) -> Optional[dict[str, Any]]:
-#     """Search for general web results.
-
-#     This function performs a search using the Tavily search engine, which is designed
-#     to provide comprehensive, accurate, and trusted results. It's particularly useful
-#     for answering questions about current events.
-#     """
-#     configuration = Configuration.from_context()
-#     wrapped = TavilySearch(max_results=configuration.max_search_results)
-#     return cast(dict[str, Any], await wrapped.ainvoke({"query": query}))   
-
-def summary_csv(file_path: str):
-    """Read the csv file and return summary data
-    
-    This function should be applied before considering what elements should be incorporated into the EDA analysis or hypothesis testing"""
-
-    df = pd.read_csv(os.path.join('data', file_path))
-    return df.describe().to_dict()
-
-
-def generate_notebook(query: str):
-    """create the json format of notebook for the given query"""
-    requirements = [
-        "Use os.path.join('../data', file_path) for file reading. ",
-        "Use Chinese descriptions. ",
-        "Ensure Chinese characters display correctly in plots if any. ",
-        "Ensure the code is executable.",
-        "If hypothesis testing is required, the default significance level is 0.05, and conclusions should be described based on this value"
-    ]
-    description = f"根据要求{requirements},完成{query}的代码，并封装为ipynb框架的json格式，不要做任何发散，直接返回可运行的框架json。"
-
-    return description
-
-def save_notebook(notebook):
-    """Save the json format of notebook to ipynb file."""
-    
-    def get_notebook_name():
-        return 'notebook_' + str(int(time.time())) + '.ipynb'
-    
-    file_name = get_notebook_name()
-    with open(os.path.join('dest', file_name), 'w', encoding='utf-8') as f:
-        json.dump(notebook, f, ensure_ascii=False, indent=1)
-    return f"{file_name} 保存成功"
-
 def gen_notebook(notebook_name: str, notebook: str) -> str:
     """create a jupter notebook from the json schema, named as notebook_name. the name should summarize the content of the notebook. return success or failed."""
     try:
         notebook = json.loads(notebook)
-        with open(os.path.join('dest', notebook_name), 'w', encoding='utf-8') as f:
+        with open(os.path.join('dest', notebook_name+'.ipynb'), 'w', encoding='utf-8') as f:
             json.dump(notebook, f, ensure_ascii=False, indent=1)
         return f"{notebook_name} 保存成功"
     except Exception as e:
@@ -89,5 +45,6 @@ def run_notebook(cells: List[int]) -> str:
     except Exception as e:
         return f"运行失败: {str(e)}"
 
-TOOLS: List[Callable[..., Any]] = [generate_notebook, save_notebook]
+# TOOLS: List[Callable[..., Any]] = [generate_notebook, save_notebook]
+TOOLS: List[Callable[..., Any]] = [gen_notebook]
 APP_TOOLS: List[Callable[..., Any]] = [gen_notebook, run_notebook]

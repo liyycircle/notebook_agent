@@ -66,4 +66,4 @@ class MyState(State):
     intent: str = field(default="")
     notebook_name: str = field(default="")
     tool_calls: List[Dict] = field(default_factory=list)
-    auto_dissect: bool = field(default=False) 
+    force_stop: bool = field(default=False)

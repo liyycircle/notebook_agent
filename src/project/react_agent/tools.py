@@ -42,4 +42,3 @@ def run_notebook(cells: List[int]) -> str:
         return f"运行失败: {str(e)}"
 
 APP_TOOLS: List[Callable[..., Any]] = [gen_notebook, run_notebook]
-TOOLS: List[Callable[..., Any]] = [gen_notebook]

@@ -10,10 +10,10 @@ class ToolResponse(BaseModel):
     run_notebook: str="我将为您运行notebook"
     gen_notebook: str="我将为您生成notebook"
 
-    def __init__(self, notebook_name: str):
+    def __init__(self, notebook_name: str, summary: str):
         super().__init__()
+        self.gen_notebook = f"我将为您生成notebook {notebook_name}, {summary}"
         self.run_notebook = f"我将为您运行notebook {notebook_name}"
-        self.gen_notebook = f"我将为您生成notebook {notebook_name}"
 
 class RequestModel(BaseModel):
     content: str
@@ -27,7 +27,7 @@ class ResponseModel(BaseModel):
     role: str = "assistant"
     tool_calls: List[Dict] = Field(default_factory=list)
     id: str
-    type: Literal["ai", "function"]
+    type: Literal["ai", "function", "stop"]
 
     def __init__(self, **data):
         if len(data["tool_calls"]) > 0:
