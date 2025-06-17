@@ -5,12 +5,15 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 from typing import Dict, List, Literal, Optional
+from langchain_community.chat_models.tongyi import ChatTongyi
+import os
 
 class RequestModel(BaseModel):
     content: str
     threadid: str
     role: str
     tool_call_id: Optional[str] = None
+    references: Optional[List[str]] = None
     status: Optional[str] = 'success'
     tool_name: Optional[str] = None
 
@@ -22,7 +25,7 @@ class ResponseModel(BaseModel):
     type: Literal["ai", "function", "stop"]
 
     def __init__(self, **data):
-        if len(data["tool_calls"]) > 0:
+        if data["tool_calls"]:
             # 转换 tool_calls 格式
             tool_calls = data["tool_calls"]
             converted_tool_calls = []
@@ -51,10 +54,10 @@ class ToolResponse(BaseModel):
     run_notebook: str="我将为您运行notebook"
     gen_notebook: str="我将为您生成notebook"
 
-    def __init__(self, notebook_name: str, summary: str):
+    def __init__(self, summary: str):
         super().__init__()
-        self.gen_notebook = f"我将为您生成notebook {notebook_name}, {summary}"
-        self.run_notebook = f"我将为您运行notebook {notebook_name}"
+        self.gen_notebook = "我将为您生成notebook。"+summary
+        
 
 def get_message_text(msg: BaseMessage) -> str:
     """Get the text content of a message."""
@@ -75,4 +78,7 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
         fully_specified_name (str): String in the format 'provider/model'.
     """
     provider, model = fully_specified_name.split("/", maxsplit=1)
+    if provider == 'tongyi':
+        return ChatTongyi(model=model, api_key='sk-66a6fcac623a475d99b9fa23b85d07c0')
     return init_chat_model(model, model_provider=provider)
+
