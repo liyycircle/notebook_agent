@@ -1,6 +1,11 @@
 # curl -X POST "http://localhost:8080/app" \
 # -H "Content-Type: application/json" \
 # -d '{"content": "天气如何"}'
+curl -X POST "http://localhost:8080/app" \
+-H "Content-Type: application/json" \
+-d '{"content":"测试123","role":"assistant","tool_calls":["das"],"id":"b9599794-f2f5-4fc4-91c8-67174fc96ddd","threadid":"3","type":"stop"}'
+
+
 
 curl -X POST "http://localhost:8080/app" \
 -H "Content-Type: application/json" \
@@ -8,7 +13,12 @@ curl -X POST "http://localhost:8080/app" \
 
 curl -X POST "http://localhost:8080/app" \
 -H "Content-Type: application/json" \
--d '{"content": "同意", "role": "user", "threadid": "3"}'
+-d '{"content": "生成订单数据的EDA分析报告，数据路径为：/Users/circle/Desktop/heywhale/agents.nosync/notebook_agent/data/tmall_order_report.csv", "role": "user", "threadid": "3"}'
+
+
+curl -X POST "http://localhost:8080/app" \
+-H "Content-Type: application/json" \
+-d '{"content": "确认", "role": "user", "threadid": "3"}'
 
 curl -X POST "http://localhost:8080/app" \
 -H "Content-Type: application/json" \
@@ -16,7 +26,7 @@ curl -X POST "http://localhost:8080/app" \
 
 curl -X POST "http://localhost:8080/app" \
 -H "Content-Type: application/json" \
--d '{"role": "tool", "content": "notebook 已生成", "tool_call_id": "call_0_fc59e883-1bc2-40e4-9b48-bb345daa0ed0", "threadid": "3", "status": "success", "tool_name": "gen_notebook"}'
+-d '{"role": "tool", "content": "notebook 已生成", "tool_call_id": "call_0_5cb20833-e631-4c3a-9a49-9567834d6bd0", "threadid": "3", "status": "success", "tool_name": "gen_notebook"}'
 
 curl -X POST "http://localhost:8080/app" \
 -H "Content-Type: application/json" \

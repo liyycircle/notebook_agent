@@ -7,7 +7,7 @@
 from typing import Dict, List, Literal, cast, TypedDict, Optional
 import uuid
 import time
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
@@ -15,9 +15,11 @@ from langgraph.types import Command, interrupt
 from react_agent.configuration import Configuration
 from react_agent.state import InputState, MyState
 from react_agent.tools import APP_TOOLS
-from react_agent.utils import load_chat_model, RequestModel, ResponseModel, ToolResponse
+from react_agent.utils import ConfigSchema, RequestModel, ResponseModel, ToolResponse, ToolMessage
+from react_agent.utils import load_chat_model
 from react_agent.prompts import INTENT_PROMPT, GEN_NOTEBOOK_PROMPT
 from langgraph.checkpoint.memory import MemorySaver
+
 
 import logging
 from fastapi import FastAPI, HTTPException
@@ -30,10 +32,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Define the function that calls the model
-def analyze_intent(state: MyState) -> Command[Literal["__end__", "tool_node", "gen_notebook"]]:
-    logger.info(f'历史消息已产生{len(state.messages)}条')
+def analyze_intent(state: MyState, config) -> Command[Literal["__end__", "tool_node", "gen_notebook"]]:
+    logger.info(f'历史消息已产生{len(state.messages)}条，message 长度为{len(str(state.messages))}')
     model = load_chat_model('deepseek/deepseek-chat')
-    # model = load_chat_model('tongyi/qwen-plus')
     # 处理工具调用结果
     if isinstance(state.messages[-1], ToolMessage):
         print('state.force_stop', state.force_stop, flush=True)
@@ -42,6 +43,11 @@ def analyze_intent(state: MyState) -> Command[Literal["__end__", "tool_node", "g
             return Command(
                 goto='__end__', 
                 update={"force_stop":False, "messages": [AIMessage(content='')]})
+        # 工具链接出错
+        if state.messages[-1].code == 400:
+            return Command(
+                goto='__end__', 
+                update={"tool_calls": [], "messages": [AIMessage(content=state.messages[-1].content)]})
         elif (len(state.tool_calls)>0) and (state.messages[-1].status == 'success'):
             logger.info(f"工具调用成功，继续调用{state.tool_calls[0]['name']}")
             return Command(goto="tool_node")
@@ -53,50 +59,36 @@ def analyze_intent(state: MyState) -> Command[Literal["__end__", "tool_node", "g
             pass
 
     logger.info("分析问题")
-    message = [{"role": "system", "content": INTENT_PROMPT}]
-    message.extend(state.messages[-min(8, len(state.messages)):])
+    message = [{"role": "system", "content": f"你使用的编程语言是{config.get('configurable', {}).get('kernel_language')}"+INTENT_PROMPT}]
+    message.extend(state.messages[-min(10, len(state.messages)):])
     response = cast(
         AIMessage,
         model.invoke(message),
     )
-    if response.content[0] == "T":
+    logger.info(f"分析问题结果：{response.content}")
+    if response.content[0:2] == "TT":
         return Command(goto="gen_notebook", update={"intent": response.content.split('TT')[-1]})
     else:
         return Command(
             goto="__end__", 
-            update={"messages": [AIMessage(content=response.content)]})
+            update={"messages": [AIMessage(content=response.content.split('TT')[0])]}) # 同时与用户 & 编程专家对话时，只保留用户对话
 
-def gen_notebook(state: MyState) -> Command[Literal["tool_node"]]:
+def gen_notebook(state: MyState, config) -> Command[Literal["tool_node"]]:
     model = load_chat_model('deepseek/deepseek-coder').bind_tools(APP_TOOLS)  
-    # model = load_chat_model('tongyi/qwen-plus').bind_tools(APP_TOOLS)  
     logger.info(f"按要求生成notebook：{state.intent}")
-    response = cast(
-        AIMessage,
-        model.invoke(
-            [{"role": "system", "content": GEN_NOTEBOOK_PROMPT}, 
-             {"role": "user", "content": f"按要求生成notebook：{state.intent}"}, *state.messages]
-        ),
-    )
-    if state.is_last_step and response.tool_calls:
-        return {
-            "tool_calls": [
-                AIMessage(
-                    id=response.id,
-                    content="Sorry, I could not find an answer to your question in the specified number of steps.",
-                )
-            ]
-        }
-    
-    # 确保返回所有工具调用
-    # TODO：notebook_name处理
-    print('response.tool_calls', response.tool_calls, flush=True)
-    # if response.tool_calls:
-    #     random_number = str(uuid.uuid4())[-4:]
-    #     response.tool_calls[0]['args']['notebook_name'] += '_'+random_number
-    #     if len(response.tool_calls) == 1:
-    #         response.tool_calls.append({'id': str(uuid.uuid4()), 'name': 'run_notebook', 'args': {'cells':[]}})
-
-    return Command(goto="tool_node", update={"tool_calls": response.tool_calls})
+    message = [
+        {"role": "system", "content": f"你使用的编程语言是{config.get('configurable', {}).get('kernel_language')}"+GEN_NOTEBOOK_PROMPT},
+        {"role": "user", "content": state.intent}]
+    message.extend(state.messages[-min(6, len(state.messages)):])
+    response = cast(AIMessage, model.invoke(message))
+    if not response.tool_calls:
+        return Command(goto="gen_notebook")
+    else:
+        last_tool_call = response.tool_calls[-1]
+        if last_tool_call['name'] != 'run_notebook':
+            logger.info('未监测到运行工具，添加run_notebook')
+            response.tool_calls.append({'id': str(uuid.uuid4()), 'name': 'run_notebook', 'args': {'cells':[]}})
+        return Command(goto="tool_node", update={"tool_calls": response.tool_calls})
 
 def tool_node(state: MyState) -> Command[Literal["__end__"]]:
     response = state.tool_calls[0]
@@ -111,14 +103,19 @@ def tool_node(state: MyState) -> Command[Literal["__end__"]]:
             'args': response['args']
         }],
         id=str(uuid.uuid4()))
-    return Command(goto="__end__", update={"messages": [output], "tool_calls": state.tool_calls[1:]})
+    # TODO: remove this node, only for local testing
+    return Command(goto="tools", update={"messages": [output], "tool_calls": state.tool_calls[1:]})
+    # return Command(goto="__end__", update={"messages": [output], "tool_calls": state.tool_calls[1:]})
 
 app = FastAPI()
 # Define a new graph
-builder = StateGraph(MyState, input=InputState, config_schema=Configuration)
+builder = StateGraph(MyState, input=InputState, config_schema=ConfigSchema)
 builder.add_node(analyze_intent)
 builder.add_node(gen_notebook)
 builder.add_node(tool_node)
+# TODO: remove this node, only for local testing
+builder.add_node("tools", ToolNode(APP_TOOLS))
+
 
 builder.add_edge("__start__", "analyze_intent")
 
@@ -135,35 +132,52 @@ graph = builder.compile(checkpointer=checkpointer, name="Notebook Agent")
 def run_agent(request_data: RequestModel):
     try:
         logger.info(f"Received request with content: {request_data.content}")
-        config = {"configurable": {"thread_id": request_data.threadid}}
+        config = {"configurable": {
+            "thread_id": request_data.threadid,
+            "kernel_language": request_data.kernel_language}}
+        current_state = graph.get_state(config=config)
 
-        if request_data.content =='system_stop':
-            graph.update_state({'force_stop': True}, config)
-            return ResponseModel(
-                content='',
-                tool_calls=[],
-                id=str(uuid.uuid4()),
-                type='stop'
-            )
-
+        # if request_data.content =='system_stop':
+        #     graph.update_state({'force_stop': True}, config)
+        #     return ResponseModel(threadid = request_data.threadid).stop()
+        
+        # 处理不同的消息类型
         if request_data.role == 'tool':
-            request_message = ToolMessage(
-                content=request_data.content,
-                tool_call_id=request_data.tool_call_id,
-                status = 'error' if request_data.status=='failed' else request_data.status)
-        elif request_data.references:
-            request_message = HumanMessage(content=f"{request_data.content}，请参考用户引用{str(request_data.references['data'])}")
+            # 返回工具时，上一条请求了工具
+            if current_state.values['messages'][-1].tool_calls:
+                request_message = ToolMessage(
+                    content=request_data.content,
+                    tool_call_id=request_data.tool_call_id,
+                    status = request_data.status)
+            # 返回工具时，上一条没请求工具，直接终止
+            else:
+                logger.warning('agent 没请求工具，但接收到工具型消息！')
+                return ResponseModel(threadid = request_data.threadid, stop=True)
+        # 普通消息
         else:
+            # 正常的消息处理
             request_message = HumanMessage(content=request_data.content)
+            # 返回消息，但上一条请求了工具，接上工具链，并覆盖原始请求content
+            if current_state.values:
+                if current_state.values['messages'][-1].tool_calls:
+                    logger.warning('上一条请求了工具，但返回消息型')
+                    last_tool_call = current_state.values['messages'][-1].tool_calls
+                    request_message = ToolMessage(
+                        content='出现了一些意外，重新和我聊聊你的需求吧', 
+                        tool_call_id=last_tool_call[0]['id'],
+                        status = 'success',
+                        code = 400)      
+
         start_time = time.time()
-        result = graph.invoke({"messages": [request_message]}, config)
+        result = graph.invoke({"messages": [request_message], "kernel_language": request_data.kernel_language}, config)
         end_time = time.time()
         logger.info(f"Successfully processed request, time cost: {end_time - start_time} 秒")
         return ResponseModel(
             content=result["messages"][-1].content,
             tool_calls=result["messages"][-1].tool_calls,
             id=result["messages"][-1].id,
-            type=result["messages"][-1].type
+            type=result["messages"][-1].type,
+            threadid = request_data.threadid
         )
 
     except Exception as e:

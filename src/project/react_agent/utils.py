@@ -4,31 +4,77 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, TypedDict
 from langchain_community.chat_models.tongyi import ChatTongyi
-import os
-from dotenv import load_dotenv
+from langchain_core.messages import ToolMessage
+import os, uuid
+import json
 
-load_dotenv()
+
+class ConfigSchema(TypedDict):
+    kernel_language: str = "python3"
+
+
+class ToolMessage(ToolMessage):
+    code: Literal[200, 400]=200
 
 class RequestModel(BaseModel):
     content: str
     threadid: str
     role: str
+    kernel_language: str
     tool_call_id: Optional[str] = None
-    references: Optional[List[str]] = None
+    references: Optional[List[dict]] = None
     status: Optional[str] = 'success'
     tool_name: Optional[str] = None
+
+    def get_valid_nbinfo(self):
+        if self.role == 'tool':
+            if self.tool_name=='run_notebook':
+                valid_dict = json.loads(self.content)
+                try:
+                    nb_content = valid_dict['Content']['cells']
+                    self.content = str([NBCell(cell).agentCell for cell in nb_content])
+                except:
+                    self.content = str(NBCell(valid_dict).agentCell)
+                
+        else:
+            if self.references:
+                for ref in self.references:
+                    if ref['type']=='notebook':
+                        ref_data = ref['data']
+                        valid_dict = json.loads(ref_data['content'])
+                        nb_content = valid_dict['Content']['cells']
+                        ref_data['content'] = [NBCell(cell).agentCell for cell in nb_content]
+                
+                self.content = self.content + f"注意参考用户引用：{str(self.references)}" 
+
+
+class NBCell():
+    # TODO: 处理img base64
+    def __init__(self, nbCell):
+      self.agentCell = {
+            "cell_id": nbCell['metadata']['id'],
+            "cell_type": nbCell['cell_type'],
+            "source": nbCell['source'],
+            "outputs": nbCell['outputs'] if nbCell['cell_type']=='code' else []
+            }
+      
+      if self.agentCell['cell_type']=='code':
+          for output in self.agentCell['outputs']:
+              if 'text/html' in output.get('data', {}).keys():
+                  del output['data']['text/html']
 
 class ResponseModel(BaseModel):
     content: str
     role: str = "assistant"
-    tool_calls: List[Dict] = Field(default_factory=list)
+    tool_calls: List[Dict] = []
     id: str
+    threadid: str
     type: Literal["ai", "function", "stop"]
 
     def __init__(self, **data):
-        if len(data["tool_calls"]) > 0:
+        if 'tool_calls' in data.keys():
             # 转换 tool_calls 格式
             tool_calls = data["tool_calls"]
             converted_tool_calls = []
@@ -42,6 +88,17 @@ class ResponseModel(BaseModel):
                     "type": "function"
                 })
             data["tool_calls"] = converted_tool_calls
+
+        if data.get('stop', False):
+            data = {
+                "content": "",
+                "role": "assistant",
+                "tool_calls": [],
+                "id": str(uuid.uuid4()),
+                "threadid": data['threadid'],
+                "type": "stop"
+            }
+
         super().__init__(**data)
 
     def to_dict(self) -> Dict:
@@ -50,18 +107,21 @@ class ResponseModel(BaseModel):
             "role": self.role,
             "tool_calls": self.tool_calls,
             "id": self.id,
+            "threadid": self.threadid,
             "type": self.type
         }
     
 class ToolResponse(BaseModel):
-    run_notebook: str="我将为您运行notebook"
-    gen_notebook: str="我将为您生成notebook"
+    run_notebook: str="我将为您运行 notebook。"
+    gen_notebook: str="我将为您生成 notebook。"
+    add_cell: str="我将为您添加 notebook cell。"
+    update_cell_by_id: str="我将为您修改 notebook cell。"
 
-    def __init__(self, summary: str = ""):
+    def __init__(self, summary: str=""):
         super().__init__()
-        if summary:
-            self.gen_notebook = "我将为您生成notebook。"+summary
-        
+        self.gen_notebook += summary
+        self.update_cell_by_id += summary
+
 
 def get_message_text(msg: BaseMessage) -> str:
     """Get the text content of a message."""
@@ -85,3 +145,4 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
     if provider == 'tongyi':
         return ChatTongyi(model=model, api_key='sk-66a6fcac623a475d99b9fa23b85d07c0')
     return init_chat_model(model, model_provider=provider)
+

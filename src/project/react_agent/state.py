@@ -38,7 +38,6 @@ class InputState:
     updating by ID to maintain an "append-only" state unless a message with the same ID is provided.
     """
 
-
 @dataclass
 class State(InputState):
     """Represents the complete state of the agent, extending InputState with additional attributes.
@@ -54,14 +53,12 @@ class State(InputState):
     It is set to 'True' when the step count reaches recursion_limit - 1.
     """
 
-    # Additional attributes can be added here as needed.
-    # Common examples include:
-    # retrieved_documents: List[Document] = field(default_factory=list)
-    # extracted_entities: Dict[str, Any] = field(default_factory=dict)
-    # api_connections: Dict[str, Any] = field(default_factory=dict)
-
 @dataclass
-class MyState(State):
+class MyState(InputState):
+    """Represents the complete state of the agent, extending InputState with additional attributes.
+
+    This class can be used to store any information needed throughout the agent's lifecycle.
+    """
     exec: bool = field(default=True)
     intent: str = field(default="")
     notebook_name: str = field(default="")

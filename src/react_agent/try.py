@@ -14,7 +14,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 from react_agent.configuration import Configuration 
-
+from typing import TypedDict
 from react_agent.state import InputState, MyState
 from react_agent.utils import ResponseModel, RequestModel
 import logging
@@ -25,8 +25,10 @@ app = FastAPI()
 
 # Define the function that calls the model
 
-def call_model(state: MyState) -> Dict[str, List[AIMessage]]:
-    return {"messages": [AIMessage(content="测试", tool_calls=[])]}
+def call_model(state: MyState, config) -> MyState:
+    kernel = config.get("configurable", {}).get("kernel")
+    print(state.messages, '======', len(state.messages))
+    return {"messages": [AIMessage(content=f"测试{kernel}", tool_calls=[])]}
 
 def ask_human(state: MyState) -> MyState:   
     last_message = state.messages[-1]
@@ -43,8 +45,12 @@ def approved_node(state: MyState) -> MyState:
     print("✅ Approved path taken.")
     return state
 
+
+class ConfigSchema(TypedDict):
+    kernel: str
+
 # Define a new graph
-builder = StateGraph(MyState, input=InputState, config_schema=Configuration)
+builder = StateGraph(MyState,  config_schema=ConfigSchema)
 
 # Define the two nodes we will cycle between
 builder.add_node(call_model)
@@ -59,16 +65,18 @@ builder.add_edge("call_model", "__end__")
 # Compile the builder into an executable graph
 checkpointer = MemorySaver()
 graph = builder.compile(checkpointer=checkpointer, name="Notebook Agent")
-config = {"configurable": {"thread_id": uuid.uuid4()}}
+# config = {"configurable": {"thread_id": uuid.uuid4()}}
     
 @app.post('/app', response_model=ResponseModel)
 def main(request_data: RequestModel):
-    config = {"configurable": {"thread_id": request_data.threadid}}
-    result = graph.invoke(HumanMessage(content=request_data.content), config)
+    request_data.get_valid_nbinfo()
+    config = {"configurable": {"thread_id": request_data.threadid, "kernel": 'xasd'}}
+    result = graph.invoke({"messages": [HumanMessage(content=request_data.content)]}, config)
     return ResponseModel(
         content=result["messages"][-1].content,
-        tool_calls=[],
+        tool_calls=[{'id': '123', 'name': 'test', 'args': {'test': 'test'}}],
         id=str(uuid.uuid4()),
+        threadid = request_data.threadid,
         type='stop'
 )
 

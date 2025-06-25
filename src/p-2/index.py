@@ -1,16 +1,17 @@
+import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Annotated, Literal
-import uuid
-from langchain_core.messages import HumanMessage
+# from langmem.short_term import SummarizationNode
+from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage
 from contextlib import asynccontextmanager
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, START, MessagesState, END
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.prebuilt import create_react_agent
 from .config import get_config, validate_environment, setup_output_directory
-import json
+import json, uuid
 
 # 全局变量存储系统实例和会话
 # programming_system = None
@@ -18,13 +19,13 @@ active_sessions: Dict[str, Dict[str, Any]] = {}
 
 notebook_structure = {
     "cells": [
-        {
-            "cell_type": "markdown",
-            "metadata": {
-                "cell_id": str(uuid.uuid4())  # 自动分配UUID
-            },
-            "source":["## 欢迎进入 ModelWhale Notebook  \n\n这里你可以编写代码，文档  \n\n### 关于文件目录  \n\n\n**project**：project 目录是本项目的工作空间，可以把将项目运行有关的所有文件放在这里，目录中文件的增、删、改操作都会被保留  \n\n\n**input**：input 目录是数据集的挂载位置，所有挂载进项目的数据集都在这里，未挂载数据集时 input 目录被隐藏  \n\n\n**temp**：temp 目录是临时磁盘空间，训练或分析过程中产生的不必要文件可以存放在这里，目录中的文件不会保存"]
-        }
+        # {
+        #     "cell_type": "markdown",
+        #     "metadata": {
+        #         "cell_id": str(uuid.uuid4())  # 自动分配UUID
+        #     },
+        #     "source":["## 欢迎进入 ModelWhale Notebook  \n\n这里你可以编写代码，文档  \n\n### 关于文件目录  \n\n\n**project**：project 目录是本项目的工作空间，可以把将项目运行有关的所有文件放在这里，目录中文件的增、删、改操作都会被保留  \n\n\n**input**：input 目录是数据集的挂载位置，所有挂载进项目的数据集都在这里，未挂载数据集时 input 目录被隐藏  \n\n\n**temp**：temp 目录是临时磁盘空间，训练或分析过程中产生的不必要文件可以存放在这里，目录中的文件不会保存"]
+        # }
     ],
     "metadata": {
         "kernelspec": {
@@ -41,82 +42,166 @@ notebook_structure = {
     "nbformat_minor": 4
 }
 
+# 创建虚拟工具类，只提供schema不执行
+class MockToolException(Exception):
+    """自定义异常，用于标识工具调用需要客户端执行"""
+    def __init__(self, tool_name: str, args: Dict[str, Any]):
+        self.tool_name = tool_name
+        self.args = args
+        super().__init__(f"Mock tool call: {tool_name}")
+
 # 定义标准的LangChain工具函数
 @tool
 def gen_notebook(
-    notebook_name: Annotated[str, Field(description="Notebook文件名（包含.ipynb后缀）")],
-    notebook: Annotated[Optional[str], Field(description="完整的notebook结构，必须是有效的JSON字符串格式", default=None)]
+    notebook_name: Annotated[str, Field(description="Notebook文件名（不含.ipynb后缀）")],
+    notebook: Annotated[Optional[str], Field(description="完整且有效的notebook结构", default=None)]
 ) -> str:
     """生成一个新的Jupyter Notebook文件"""
     return f"生成notebook: {notebook_name}"
 
 @tool  
 def add_cell(
-    filename: Annotated[str, Field(description="Notebook文件名")],
     content: Annotated[str, Field(description="单元格内容")],
-    cell_type: Annotated[str, Field(description="单元格类型", default="code")] = "code",
-    cell_index: Annotated[int, Field(description="插入位置（-1表示添加到末尾）", default=-1)] = -1
+    cell_type: Annotated[str, Field(description="单元格类型（code/markdown）")],
+    cell_index: Annotated[int, Field(description="插入位置（默认-1，表示添加到末尾）")] 
 ) -> str:
     """向Notebook添加单元格（代码或Markdown）"""
-    return f"添加cell到 {filename}: {cell_type} cell with content: {content[:50]}..."
-
-
+    raise MockToolException("add_cell", {
+        # "filename": filename,
+        "content": content,
+        "cell_type": cell_type,
+        "cell_index": cell_index
+    })
 
 @tool
 def update_cell_by_id(
-    filename: Annotated[str, Field(description="Notebook文件名")],
+    # filename: Annotated[str, Field(description="Notebook文件名")],
     cell_id: Annotated[str, Field(description="单元格UUID")],
     new_content: Annotated[str, Field(description="新的单元格内容")]
 ) -> str:
     """通过UUID更新Notebook中的单元格内容"""
-    return f"更新cell {cell_id} in {filename}: {new_content[:50]}..."
+    raise MockToolException("update_cell_by_id", {
+        # "filename": filename,
+        "cell_id": cell_id,
+        "new_content": new_content
+    })
 
-@tool
-def delete_cell_by_id(
-    filename: Annotated[str, Field(description="Notebook文件名")],
-    cell_id: Annotated[str, Field(description="要删除的单元格UUID")]
-) -> str:
-    """通过UUID删除Notebook中的单元格"""
-    return f"删除cell {cell_id} from {filename}"
+# @tool
+# def delete_cell_by_id(
+#     filename: Annotated[str, Field(description="Notebook文件名")],
+#     cell_id: Annotated[str, Field(description="要删除的单元格UUID")]
+# ) -> str:
+#     """通过UUID删除Notebook中的单元格"""
+#     return f"删除cell {cell_id} from {filename}"
 
 @tool
 def run_notebook(
-    filename: Annotated[str, Field(description="要运行的Notebook文件名")],
-    cells: Annotated[List[str], Field(description="需要运行的代码cell ID列表，若为空则运行全部代码单元格", default_factory=list)] = None
+    # cells: Annotated[List[str], Field(description="需要运行的代码cell ID列表，若为空则运行全部代码单元格", default_factory=list)] = None
 ) -> str:
     """运行notebook中的代码单元格，返回运行后的notebook内容"""
-    return f"运行notebook {filename}, cells: {cells or 'all'} - 执行完成，返回notebook内容以供检查运行结果和错误"
+    raise MockToolException("run_notebook", {
+        # "cells": cells or []
+    })
+
+def cleanup_notebook_results_when_needed(threadid: str, programming_system):
+    """
+    检查是否需要清理run_notebook结果，将历史的notebook内容设置为空
+    保持工具调用的完整性，避免LLM提供商报错，同时彻底节省上下文空间
+    """
+    config = {"configurable": {"thread_id": threadid}}
+    
+    try:
+        # 获取当前状态
+        current_state = programming_system.get_state(config)
+        messages = current_state.values.get("messages", [])
+        
+        if not messages:
+            return
+        # 获取最后一条消息
+        last_message = messages[-1]
+        # 检查是否是AI消息且包含run_notebook工具调用
+        has_run_notebook_call = False
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            for tool_call in last_message.tool_calls:
+                tool_name = tool_call.get('name', '') if isinstance(tool_call, dict) else getattr(tool_call, 'name', '')
+                if tool_name == 'run_notebook':
+                    has_run_notebook_call = True
+                    break
+        
+        # 如果没有run_notebook调用，直接返回
+        if not has_run_notebook_call:
+            return
+        
+        # 首先收集所有run_notebook的tool_call_id（排除最新的）
+        run_notebook_tool_call_ids = set()
+        for i, msg in enumerate(messages[:-1]):               
+            if (hasattr(msg, 'type') and msg.type == 'ai' and 
+                hasattr(msg, 'tool_calls') and msg.tool_calls):
+                for tool_call in msg.tool_calls:
+                    tool_name = tool_call.get('name', '') if isinstance(tool_call, dict) else getattr(tool_call, 'name', '')
+                    if tool_name == 'run_notebook':
+                        tool_call_id = tool_call.get('id', '') if isinstance(tool_call, dict) else getattr(tool_call, 'id', '')
+                        if tool_call_id:
+                            run_notebook_tool_call_ids.add(tool_call_id)
+
+        # 找到所有需要清理的run_notebook结果消息
+        messages_to_update = []
+        # 遍历消息，找到所有对应历史run_notebook的ToolMessage结果
+        for i, msg in enumerate(messages):  
+            if (hasattr(msg, 'type') and msg.type == 'tool' and 
+                hasattr(msg, 'tool_call_id') and msg.tool_call_id in run_notebook_tool_call_ids):                
+                updated_message = ToolMessage(
+                    content=msg.status,
+                    tool_call_id=msg.tool_call_id,
+                    id=msg.id,
+                    status=msg.status,
+                    threadid=msg.threadid,
+                )
+                messages_to_update.append(updated_message)
+        # 如果有消息需要更新，使用update_state更新
+        if messages_to_update:
+            programming_system.update_state(config, {"messages": messages_to_update})
+    except Exception as e:
+        print(f"❌ 清理run_notebook结果时出错: {e}")
 
 def create_mock_programming_assistant():
-    """创建模拟执行的NotebookAgent系统"""
-    config = get_config("notebook_agent")  # 使用NotebookAgent配置
+    """创建使用create_react_agent但不实际执行工具的系统"""
     openai_config = get_config("openai")
     
     llm = ChatOpenAI(
         model=openai_config["model"],
         api_key=openai_config["api_key"],
         base_url=openai_config["base_url"],
-        temperature=openai_config["temperature"]
+        temperature=openai_config["temperature"],
+        streaming=False
     )
-    
-    # 绑定NotebookAgent的工具schema
-    llm_with_tools = llm.bind_tools([
-        gen_notebook,
-        add_cell,
-        update_cell_by_id,
-        delete_cell_by_id,
-        run_notebook
-    ])
     
     # 创建checkpointer
     checkpointer = InMemorySaver()
+
+    # summarization_node = SummarizationNode( 
+    #     token_counter=count_tokens_approximately,
+    #     model=llm,
+    #     max_tokens=60000,
+    #     max_tokens_before_summary=50000,
+    # )
     
-    # 创建带系统消息的LLM
-    system_message = SystemMessage(content="""你是Jupyter Notebook专家，管理有状态的Notebook环境。
+    # 使用create_react_agent创建agent，但在工具节点前中断
+    graph = create_react_agent(
+        model=llm,
+        tools=[
+            gen_notebook,
+            add_cell,
+            update_cell_by_id,
+            run_notebook
+        ],
+        # pre_model_hook=summarization_node,
+        prompt="""你是Jupyter Notebook专家，管理有状态的Notebook环境。
 
 重要：
 - 你必须既提供清晰的文字回复，又调用适当的工具。永远不要只调用工具而不说话。
 - 不要编造数据，不要编造结果，一切分析和总结要基于实际结果。
+- 你可以通过运行代码查看结果，为后续代码生成提供参考。
 
 对话原则：
 1. 首先理解用户需求并确认
@@ -125,36 +210,22 @@ def create_mock_programming_assistant():
 4. 总结完成的工作
 
 工具：
-- gen_notebook：生成完整的notebook文件
+- gen_notebook：生成notebook文件
 - add_cell：添加cell到指定位置
 - update_cell_by_id：通过ID更新修改cell内容
 - delete_cell_by_id：通过ID删除cell
-- run_notebook：运行notebook中的代码单元格，返回运行后的notebook内容以供检查运行结果和错误
+- run_notebook：运行notebook中的代码单元格，返回运行后的notebook内容，以供检查错误、总结结果和为后续cell提供参考
 
-代码生成原则：
-- 请记住Notbeook是有状态的，需要考虑cell的顺序和依赖关系。
-- 不要重复定义之前cell中的变量、函数、类等，不要重复导入包。
-- 你无法直接"看到"图片，所以画图同时尽量打印数据或相关信息。
+工作原则：
+- 创建Noteook文件再添加代码
+- 运行代码可查看结果，为后续代码生成提供参考。
+- 当生成可视化图表时使用英文，必须同步以结构化方式输出可视化图表的汇总统计数据或原始数据。
+- 调试修改代码时，直接更新cell内容，不要新增cell代码块。
+- 每次只生成一个工具调用，不要生成多个工具调用。
 
-记住：始终先解释，再行动，最后总结。""")
-    
-    def agent_node(state: MessagesState):
-        """Notebook代理节点 - 自动处理系统消息"""
-        messages = state["messages"]
-        if not messages or not (hasattr(messages[0], 'type') and messages[0].type == 'system'):
-            messages = [system_message] + messages
-        
-        response = llm_with_tools.invoke(messages)
-        return {"messages": [response]}
-
-    
-    # 创建状态图 - 最简洁的写法
-    graph = (
-        StateGraph(MessagesState)
-        .add_node("agent", agent_node)
-        .add_edge(START, "agent") 
-        .add_edge("agent", END)
-        .compile(checkpointer=checkpointer)
+记住：始终先解释，再行动，最后总结。""",
+        checkpointer=checkpointer,
+        interrupt_before=["tools"]
     )
     
     return graph
@@ -193,25 +264,25 @@ print("✅ 模拟编程助手API启动完成！")
 # )
 
 # 请求和响应模型
-class UserRequest(BaseModel):
-    threadid: str
-    role: Literal["user"] = "user"
-    content: str
+# class UserRequest(BaseModel):
+#     threadid: str
+#     role: Literal["user"] = "user"
+#     content: str
 
-class ToolRequest(BaseModel):
-    threadid: str
-    role: Literal["tool"] = "tool"
-    content: str
-    tool_call_id: str
-    status: Literal["success", "error"] = "success"
+# class ToolRequest(BaseModel):
+#     threadid: str
+#     role: Literal["tool"] = "tool"
+#     content: str
+#     tool_call_id: str
+#     status: Literal["success", "error"] = "success"
 
-class ChatRequest(BaseModel):
-    """统一的聊天请求，支持用户消息和工具结果"""
-    threadid: str
-    role: Literal["user", "tool"]
-    content: str
-    tool_call_id: Optional[str] = None
-    status: Optional[Literal["success", "error"]] = None
+# class ChatRequest(BaseModel):
+#     """统一的聊天请求，支持用户消息和工具结果"""
+#     threadid: str
+#     role: Literal["user", "tool"]
+#     content: str
+#     tool_call_id: Optional[str] = None
+#     status: Optional[Literal["success", "error"]] = None
 
 class ToolCall(BaseModel):
     function: Dict[str, Any]
@@ -224,9 +295,10 @@ class ChatResponse(BaseModel):
     id: str
     type: str = ""  # 默认值，会在模型验证时被正确设置
     tool_calls: List[ToolCall] = []
+    threadid: str 
     
     @classmethod
-    def create(cls, content: str, id: str, tool_calls: List[ToolCall] = None):
+    def create(cls, content: str, id: str, tool_calls: List[ToolCall] = None, threadid: str = None):
         """创建ChatResponse实例，自动设置type字段"""
         if tool_calls is None:
             tool_calls = []
@@ -237,8 +309,18 @@ class ChatResponse(BaseModel):
             content=content,
             id=id,
             type=response_type,
-            tool_calls=tool_calls
+            tool_calls=tool_calls,
+            threadid=threadid
         )
+
+def clean_ansi(text):
+    if not isinstance(text, str):
+        return text
+    # 将unicode转义序列转换为字符串
+    text = text.encode().decode('unicode_escape')
+    # 移除ANSI转义序列
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 def extract_ai_message_from_updates(updates: List[Any]) -> Dict[str, Any]:
     """从更新中提取最后一个AI消息的完整信息"""
@@ -314,10 +396,15 @@ def extract_ai_message_from_updates(updates: List[Any]) -> Dict[str, Any]:
             
             # 特殊处理：如果是gen_notebook且没有notebook参数，添加默认值
             if tool_name == 'gen_notebook':
-                tool_args['notebook_name'] = tool_args['notebook_name'].split('.')[0] + '_' + str(uuid.uuid4()).split('-')[1] + '.ipynb'
-                if 'notebook' not in tool_args or not tool_args['notebook']:
-                    tool_args['notebook'] = json.dumps(notebook_structure)  # 确保是JSON格式
-                    print(f"Added default notebook_structure to gen_notebook call")
+                # 确保文件名唯一性
+
+                base_name = tool_args.get('notebook_name', 'notebook').replace('.ipynb', '')
+                tool_args['notebook_name'] = f"{base_name}_{str(uuid.uuid4()).split('-')[1]}.ipynb"
+                
+                # 如果没有提供notebook结构，使用默认结构（作为JSON字符串）
+                if 'notebook' not in tool_args or tool_args['notebook'] is None:
+                    tool_args['notebook'] = json.dumps(notebook_structure, ensure_ascii=False, indent=2)
+                    print(f"Added default notebook_structure as JSON string to gen_notebook call")
             
             tool_call_dict = {
                 "function": {
@@ -325,7 +412,7 @@ def extract_ai_message_from_updates(updates: List[Any]) -> Dict[str, Any]:
                     "name": tool_name
                 },
                 "id": tool_id,
-                "type": 'function'
+                "type": tool_type
             }
             result["tool_calls"].append(tool_call_dict)
     
@@ -334,6 +421,7 @@ def extract_ai_message_from_updates(updates: List[Any]) -> Dict[str, Any]:
 # @app.post("/", response_model=ChatResponse)
 # async def chat(request: ChatRequest):
 def invoke(request):
+    print(f"🔍 ID: {request['threadid']}")
     """统一的对话接口，支持用户消息和工具结果"""
     global programming_system, active_sessions
     
@@ -351,43 +439,123 @@ def invoke(request):
         messages = []
         
         if request["role"] == "tool":
+            if request["tool_name"] == "run_notebook":
+                if request["status"] == "success":
+                    content_dict = json.loads(request["content"])
+                    cells = content_dict["Content"]['cells']
+                    for cell in cells:
+                        if cell['cell_type'] == 'code':
+                            for output in cell['outputs']:
+                                if 'text' in output:
+                                    text = ''.join(output['text']) if isinstance(output['text'], list) else output['text']
+                                    text = clean_ansi(text)
+                                    output['text'] = text
+                                if 'data' in output:
+                                    filtered_data = {}
+                                    for key, value in output['data'].items():
+                                        if key in ['text/plain', 'text/markdown', 'text/latex', 'application/json']:
+                                            if isinstance(value, list):
+                                                filtered_data[key] = [clean_ansi(v) for v in value]
+                                            else:
+                                                filtered_data[key] = clean_ansi(value)
+                                    output['data'] = filtered_data
+                    # 将处理后的结果重新序列化回request["content"]
+                    request["content"] = json.dumps(content_dict, ensure_ascii=False)
+                else:
+                    request["content"] = json.loads(clean_ansi(request["content"]))
+                                    
             # 如果是工具结果，构建ToolMessage
             if not request["tool_call_id"]:
                 raise HTTPException(status_code=400, detail="工具消息缺少tool_call_id")
             
-            from langchain_core.messages import ToolMessage
             tool_message = ToolMessage(
                 content=request["content"],
-                tool_call_id=request["tool_call_id"]
+                tool_call_id=request["tool_call_id"],
+                status = request["status"],
+                threadid=request["threadid"]
             )
-            messages.append(tool_message)
             print(f"🔍 构建了工具消息，tool_call_id: {request['tool_call_id']}")
+
+            # 工具结果返回后，需要继续执行agent
+            # 添加工具消息到当前状态并继续执行
+            updates = []
+            for chunk in programming_system.stream(
+                {"messages": [tool_message]},  # 发送工具消息
+                config=config
+            ):
+                updates.append(chunk)
         else:
             # 如果是用户消息，构建HumanMessage
-            messages.append(HumanMessage(content=request["content"]))
+            messages.append(HumanMessage(content=request["content"], threadid=request["threadid"]))
             print(f"🔍 构建了用户消息")
-        
-        # 收集所有更新
-        updates = []
-        
-        for chunk in programming_system.stream(
-            {"messages": messages},
-            config=config
-        ):
-            updates.append(chunk)
+
+            # 收集所有更新
+            updates = []
+            for chunk in programming_system.stream(
+                {"messages": messages},
+                config=config
+            ):
+                updates.append(chunk)
         
         print(f"🔍 收集到 {len(updates)} 个更新")
+
+        # 🔑 检查并清理run_notebook结果（在中断检查之前）
+        cleanup_notebook_results_when_needed(request["threadid"], programming_system)
+
+        # 检查是否因工具调用而中断
+        # 当使用interrupt_before=["tools"]时，如果有工具调用，会在工具节点前中断
+        current_state = programming_system.get_state(config)
+        print(f"🔍 当前状态: next={current_state.next}, is_interrupted={len(current_state.next) > 0}")
+
+        if current_state.next and "tools" in current_state.next:
+            # 如果下一步是工具节点，说明被中断了，需要提取工具调用
+            print("🔍 检测到工具调用中断，提取工具调用信息")
+            
+            # 从当前状态中获取最后的AI消息（包含工具调用）
+            if current_state.values.get("messages"):
+                last_message = current_state.values["messages"][-1]
+                if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                    ai_message = {
+                        "content": getattr(last_message, 'content', ''),
+                        "id": getattr(last_message, 'id', str(uuid.uuid4())),
+                        "tool_calls": [],
+                        "type": "ai"
+                    }
+                    
+                    # 转换工具调用格式
+                    for tc in last_message.tool_calls:
+                        tool_name = tc.get('name', '') if isinstance(tc, dict) else getattr(tc, 'name', '')
+                        tool_args = tc.get('args', {}) if isinstance(tc, dict) else getattr(tc, 'args', {})
+                        tool_id = tc.get('id', str(uuid.uuid4())) if isinstance(tc, dict) else getattr(tc, 'id', str(uuid.uuid4()))
+                        
+                        # 特殊处理gen_notebook
+                        if tool_name == 'gen_notebook':
+                            base_name = tool_args.get('notebook_name', 'notebook').replace('.ipynb', '')
+                            tool_args['notebook_name'] = f"{base_name}_{str(uuid.uuid4()).split('-')[1]}.ipynb"
+                            
+                            if 'notebook' not in tool_args or tool_args['notebook'] is None:
+                                tool_args['notebook'] = json.dumps(notebook_structure, ensure_ascii=False, indent=2)
+                        
+                        ai_message["tool_calls"].append({
+                            "function": {
+                                "arguments": tool_args,
+                                "name": tool_name
+                            },
+                            "id": tool_id,
+                            "type": "function"
+                        })
+                else:
+                    # 如果没有工具调用，返回普通消息
+                    ai_message = extract_ai_message_from_updates(updates)
+            else:
+                ai_message = extract_ai_message_from_updates(updates)
+        else:
+            # 正常处理，没有中断
+            ai_message = extract_ai_message_from_updates(updates)
         
-        # 提取AI消息
-        ai_message = extract_ai_message_from_updates(updates)
         print(f"🔍 提取AI消息完成，content长度: {len(ai_message.get('content', ''))}")
-        
-        # 检查是否有工具调用
-        has_tool_calls = len(ai_message["tool_calls"]) > 0
         print(f"🔍 工具调用数量: {len(ai_message['tool_calls'])}")
-        
-        print(f"🔍 准备构建响应")
-        
+
         # 安全地构建ToolCall对象
         tool_call_objects = []
         for tc in ai_message["tool_calls"]:
@@ -405,7 +573,8 @@ def invoke(request):
         response = ChatResponse.create(
             content=ai_message["content"],
             id=ai_message["id"],
-            tool_calls=tool_call_objects
+            tool_calls=tool_call_objects,
+            threadid=request["threadid"]
         )
         
         print(f"✅ 响应构建完成")
